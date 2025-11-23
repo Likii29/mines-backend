@@ -262,6 +262,12 @@ async function listRedeemRequests() {
   return loadRedeems();
 }
 
+async function listRedeemsForUser(username){
+  if(db) return await db.collection('redeems').find({ user: username }).toArray();
+  const all = loadRedeems();
+  return all.filter(r=>r.user === username);
+}
+
 async function confirmRedeemRequest(id) {
   if (db) {
     const col = db.collection('redeems');
@@ -335,7 +341,24 @@ app.get("/api/me", async (req, res) => {
   if (!user) return res.status(404).json({ error: "not found" });
 
   const { passwordHash, ...clean } = user;
+  // include redeem requests related to this user
+  try{
+    const redeems = await listRedeemsForUser(req.authUser);
+    clean.redeems = redeems;
+  }catch(e){ clean.redeems = []; }
   res.json({ ok: true, user: clean });
+});
+
+// Get public user data (credits + redeems)
+app.get('/api/user/:user', async (req,res)=>{
+  try{
+    const user = req.authUser || req.params.user;
+    const u = await getUserFromStore(user);
+    if(!u) return res.status(404).json({ ok:false, error:'user not found' });
+    const { passwordHash, ...clean } = u;
+    try{ clean.redeems = await listRedeemsForUser(user); }catch(e){ clean.redeems = []; }
+    return res.json({ ok:true, user: clean });
+  }catch(e){ console.error('user fetch err', e); res.status(500).json({ error:'failed' }); }
 });
 
 // DEBIT
