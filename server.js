@@ -262,6 +262,18 @@ async function listRedeemRequests() {
   return loadRedeems();
 }
 
+// list redeems for a specific user (optionally only approved)
+async function listRedeemsForUser(username, onlyApproved = false){
+  if(db){
+    const q = { user: username };
+    if(onlyApproved) q.status = 'approved';
+    return await db.collection('redeems').find(q).toArray();
+  }
+  const all = loadRedeems();
+  const out = all.filter(r => r.user === username);
+  return onlyApproved ? out.filter(r=>r.status === 'approved') : out;
+}
+
 async function listRedeemsForUser(username){
   if(db) return await db.collection('redeems').find({ user: username }).toArray();
   const all = loadRedeems();
@@ -274,7 +286,14 @@ async function confirmRedeemRequest(id) {
     const r = await col.findOne({ id });
     if (!r) throw new Error('not found');
     await col.updateOne({ id }, { $set: { status: 'approved', approvedAt: new Date().toISOString() } });
-    return await col.findOne({ id });
+    const updated = await col.findOne({ id });
+    // also record into user's redemptions array for history
+    try {
+      await db.collection(USERS_COLL).updateOne({ _id: updated.user }, { $push: { redemptions: { email: updated.email, amount: updated.amount, date: updated.date, approvedAt: updated.approvedAt } } });
+    } catch (e) {
+      console.warn('failed to push redemption to user record', e);
+    }
+    return updated;
   }
 
   const all = loadRedeems();
@@ -283,6 +302,17 @@ async function confirmRedeemRequest(id) {
   r.status = 'approved';
   r.approvedAt = new Date().toISOString();
   saveRedeems(all);
+  // push to user's redemptions in JSON fallback
+  try {
+    const users = loadUsers();
+    if (!users[r.user]) users[r.user] = { credits: 0, redemptions: [] };
+    users[r.user].redemptions = users[r.user].redemptions || [];
+    users[r.user].redemptions.push({ email: r.email, amount: r.amount, date: r.date, approvedAt: r.approvedAt });
+    saveUsers(users);
+  } catch (e) {
+    console.warn('failed to push redemption to users.json', e);
+  }
+
   return r;
 }
 
