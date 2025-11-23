@@ -30,6 +30,16 @@
     <tbody id="rows"></tbody>
   </table>
 
+  <h2>Withdrawal Requests</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th><th>User</th><th>Email</th><th>Amount</th><th>Status</th><th>Action</th>
+      </tr>
+    </thead>
+    <tbody id="redeemRows"></tbody>
+  </table>
+
   <script>
     const ADMIN_KEY = "liki@2921";
 
@@ -92,6 +102,50 @@
 
     load();
     setInterval(load, 10000);
+
+    // Withdrawals
+    async function loadRedeems() {
+      try {
+        const res = await fetch(`/api/admin/redeems?key=${ADMIN_KEY}`);
+        const j = await res.json();
+        const rows = document.getElementById('redeemRows');
+        rows.innerHTML = '';
+        if (!j.ok || !j.redeems) return;
+        j.redeems.slice().reverse().forEach(r => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${r.id}</td>
+            <td>${r.user}</td>
+            <td>${r.email}</td>
+            <td>${r.amount}</td>
+            <td>${r.status}</td>
+            <td></td>
+          `;
+
+          const btn = document.createElement('button');
+          btn.textContent = r.status === 'approved' ? 'Approved' : 'Approve';
+          btn.disabled = r.status === 'approved';
+          btn.onclick = async () => {
+            btn.disabled = true;
+            btn.textContent = 'Approving...';
+            await fetch(`/api/admin/confirmRedeem?key=${ADMIN_KEY}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: r.id })
+            });
+            loadRedeems();
+          };
+
+          tr.children[5].appendChild(btn);
+          rows.appendChild(tr);
+        });
+      } catch (e) {
+        console.warn('failed loading redeems', e);
+      }
+    }
+
+    loadRedeems();
+    setInterval(loadRedeems, 10000);
   </script>
 </body>
 </html>

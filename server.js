@@ -228,6 +228,59 @@ async function confirmTxInStore(id, amount) {
 }
 
 // =========================================================
+// WITHDRAWAL (REDEEMS) STORAGE + HELPERS
+// =========================================================
+const REDEEMS_FILE = path.join(DATA_DIR, "redeems.json");
+if (!fs.existsSync(REDEEMS_FILE)) fs.writeFileSync(REDEEMS_FILE, "[]", "utf8");
+
+function loadRedeems() { return JSON.parse(fs.readFileSync(REDEEMS_FILE, "utf8") || "[]"); }
+function saveRedeems(r) { fs.writeFileSync(REDEEMS_FILE, JSON.stringify(r, null, 2), "utf8"); }
+
+async function createRedeemRequest(user, email, amount) {
+  const rec = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2,8),
+    user,
+    email,
+    amount,
+    status: 'pending',
+    date: new Date().toISOString()
+  };
+
+  if (db) {
+    await db.collection('redeems').insertOne(rec);
+    return rec;
+  }
+
+  const all = loadRedeems();
+  all.push(rec);
+  saveRedeems(all);
+  return rec;
+}
+
+async function listRedeemRequests() {
+  if (db) return await db.collection('redeems').find({}).toArray();
+  return loadRedeems();
+}
+
+async function confirmRedeemRequest(id) {
+  if (db) {
+    const col = db.collection('redeems');
+    const r = await col.findOne({ id });
+    if (!r) throw new Error('not found');
+    await col.updateOne({ id }, { $set: { status: 'approved', approvedAt: new Date().toISOString() } });
+    return await col.findOne({ id });
+  }
+
+  const all = loadRedeems();
+  const r = all.find(x => x.id === id);
+  if (!r) throw new Error('not found');
+  r.status = 'approved';
+  r.approvedAt = new Date().toISOString();
+  saveRedeems(all);
+  return r;
+}
+
+// =========================================================
 // PUBLIC ROUTES
 // =========================================================
 app.get("/", (req, res) => res.json({ ok: true }));
@@ -329,11 +382,58 @@ app.post("/api/txid", async (req, res) => {
   res.json({ ok: true, id: record.id });
 });
 
+// USER WITHDRAW REQUEST ==========================
+app.post('/api/user/:user/redeem', async (req, res) => {
+  try {
+    const user = req.params.user;
+    const { email, amount } = req.body || {};
+    if (!email || !amount) return res.status(400).json({ error: 'missing fields' });
+    if (Number(amount) < 25) return res.status(400).json({ error: 'minimum 25 credits required' });
+
+    const u = await getUserFromStore(user);
+    if (!u) return res.status(404).json({ error: 'user not found' });
+    if ((u.credits || 0) < amount) return res.status(400).json({ error: 'not enough credits' });
+
+    // debit first
+    await debitUserInStore(user, Number(amount));
+
+    // create redeem request
+    const rec = await createRedeemRequest(user, email, Number(amount));
+
+    return res.json({ ok: true, request: rec });
+  } catch (err) {
+    console.error('redeem error', err);
+    return res.status(400).json({ error: err.message || 'failed' });
+  }
+});
+
 // =========================================================
 // ADMIN ROUTES
 // =========================================================
 app.get("/api/admin/txids", adminLock, async (req, res) => {
   res.json({ ok: true, txs: await listTxsFromStore() });
+});
+
+// ADMIN: list redeem requests
+app.get('/api/admin/redeems', adminLock, async (req, res) => {
+  try {
+    const list = await listRedeemRequests();
+    res.json({ ok: true, redeems: list });
+  } catch (e) {
+    res.status(500).json({ error: 'failed' });
+  }
+});
+
+// ADMIN: confirm redeem
+app.post('/api/admin/confirmRedeem', adminLock, async (req, res) => {
+  try {
+    const { id } = req.body || {};
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const rec = await confirmRedeemRequest(id);
+    return res.json({ ok: true, rec });
+  } catch (e) {
+    return res.status(404).json({ error: 'not found' });
+  }
 });
 
 // CONFIRM TXID + EMAIL
