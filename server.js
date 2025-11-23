@@ -37,19 +37,11 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, JSON.stringify({}), "utf8");
 if (!fs.existsSync(TX_FILE)) fs.writeFileSync(TX_FILE, JSON.stringify([]), "utf8");
 
-function loadUsers() {
-  return JSON.parse(fs.readFileSync(USERS_FILE, "utf8") || "{}");
-}
-function saveUsers(u) {
-  fs.writeFileSync(USERS_FILE, JSON.stringify(u, null, 2), "utf8");
-}
+function loadUsers() { return JSON.parse(fs.readFileSync(USERS_FILE, "utf8") || "{}"); }
+function saveUsers(u) { fs.writeFileSync(USERS_FILE, JSON.stringify(u, null, 2), "utf8"); }
 
-function loadTx() {
-  return JSON.parse(fs.readFileSync(TX_FILE, "utf8") || "[]");
-}
-function saveTx(t) {
-  fs.writeFileSync(TX_FILE, JSON.stringify(t, null, 2), "utf8");
-}
+function loadTx() { return JSON.parse(fs.readFileSync(TX_FILE, "utf8") || "[]"); }
+function saveTx(t) { fs.writeFileSync(TX_FILE, JSON.stringify(t, null, 2), "utf8"); }
 
 // =========================================================
 // MONGODB CONFIG
@@ -98,6 +90,28 @@ function authMiddleware(req, res, next) {
 app.use(authMiddleware);
 
 // =========================================================
+// EMAIL SENDER (helper)
+// =========================================================
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASS },
+});
+
+async function sendEmail(to, subject, text) {
+  try {
+    await transporter.sendMail({
+      from: process.env.GMAIL_USER,
+      to,
+      subject,
+      text,
+    });
+    console.log("EMAIL SENT →", to);
+  } catch (err) {
+    console.error("EMAIL ERROR →", err);
+  }
+}
+
+// =========================================================
 // STORAGE LAYER (MONGO OR JSON)
 // =========================================================
 
@@ -108,9 +122,11 @@ async function getUserFromStore(username) {
 
 async function ensureUserInStore(username) {
   if (db) {
-    await db
-      .collection(USERS_COLL)
-      .updateOne({ _id: username }, { $setOnInsert: { credits: 0, redemptions: [] } }, { upsert: true });
+    await db.collection(USERS_COLL).updateOne(
+      { _id: username },
+      { $setOnInsert: { credits: 0, redemptions: [] } },
+      { upsert: true }
+    );
     return await db.collection(USERS_COLL).findOne({ _id: username });
   }
   const users = loadUsers();
@@ -121,9 +137,11 @@ async function ensureUserInStore(username) {
 
 async function creditUserInStore(username, amount) {
   if (db) {
-    const res = await db
-      .collection(USERS_COLL)
-      .findOneAndUpdate({ _id: username }, { $inc: { credits: amount } }, { returnDocument: "after" });
+    const res = await db.collection(USERS_COLL).findOneAndUpdate(
+      { _id: username },
+      { $inc: { credits: amount } },
+      { returnDocument: "after" }
+    );
     return res.value.credits;
   }
   const users = loadUsers();
@@ -138,9 +156,11 @@ async function debitUserInStore(username, amount) {
     if (!u) throw new Error("user not found");
     if (u.credits < amount) throw new Error("insufficient credits");
 
-    const res = await db
-      .collection(USERS_COLL)
-      .findOneAndUpdate({ _id: username }, { $inc: { credits: -amount } }, { returnDocument: "after" });
+    const res = await db.collection(USERS_COLL).findOneAndUpdate(
+      { _id: username },
+      { $inc: { credits: -amount } },
+      { returnDocument: "after" }
+    );
 
     return res.value.credits;
   }
@@ -148,6 +168,7 @@ async function debitUserInStore(username, amount) {
   const users = loadUsers();
   if (!users[username]) throw new Error("user not found");
   if (users[username].credits < amount) throw new Error("insufficient credits");
+
   users[username].credits -= amount;
   saveUsers(users);
   return users[username].credits;
@@ -187,7 +208,6 @@ async function confirmTxInStore(id, amount) {
     );
 
     await creditUserInStore(tx.user, amount);
-
     return await col.findOne({ id });
   }
 
@@ -206,14 +226,6 @@ async function confirmTxInStore(id, amount) {
 
   return tx;
 }
-
-// =========================================================
-// EMAIL SETUP
-// =========================================================
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASS },
-});
 
 // =========================================================
 // PUBLIC ROUTES
@@ -290,7 +302,7 @@ app.post("/api/user/:user/credit", async (req, res) => {
   res.json({ ok: true, credits });
 });
 
-// SUBMIT TXID
+// SUBMIT TXID (WITH EMAIL)
 app.post("/api/txid", async (req, res) => {
   const { user, txid } = req.body;
 
@@ -308,20 +320,35 @@ app.post("/api/txid", async (req, res) => {
   };
 
   await createTxInStore(record);
+
+  // EMAIL ADMIN
+  sendEmail(
+    process.env.ADMIN_EMAIL,
+    "New TXID Submitted",
+    `User: ${user}\nTXID: ${txid}\nID: ${record.id}`
+  );
+
   res.json({ ok: true, id: record.id });
 });
 
 // =========================================================
-// ADMIN ROUTES (REQUIRE KEY)
+// ADMIN ROUTES
 // =========================================================
-
 app.get("/api/admin/txids", adminLock, async (req, res) => {
   res.json({ ok: true, txs: await listTxsFromStore() });
 });
 
+// CONFIRM TXID (EMAIL USER OR ADMIN)
 app.post("/api/admin/confirm", adminLock, async (req, res) => {
   try {
-    await confirmTxInStore(req.body.id, 5);
+    const tx = await confirmTxInStore(req.body.id, 5);
+
+    sendEmail(
+      process.env.ADMIN_EMAIL,
+      "TXID Confirmed",
+      `TXID: ${tx.txid}\nUser: ${tx.user}\nCredits Added: 5`
+    );
+
     res.json({ ok: true });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -329,7 +356,7 @@ app.post("/api/admin/confirm", adminLock, async (req, res) => {
 });
 
 // =========================================================
-// STATIC ADMIN PANEL — MUST BE LAST
+// ADMIN PANEL (STATIC)
 // =========================================================
 app.use("/admin", adminLock, express.static(path.join(__dirname, "admin")));
 
