@@ -90,17 +90,22 @@ function authMiddleware(req, res, next) {
 app.use(authMiddleware);
 
 // =========================================================
-// EMAIL SENDER (helper)
+// EMAIL: RESEND SMTP (REPLACES GMAIL)
 // =========================================================
 const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASS },
+  host: "smtp.resend.com",
+  port: 587,
+  secure: false,
+  auth: {
+    user: "resend",
+    pass: process.env.RESEND_API_KEY,
+  },
 });
 
 async function sendEmail(to, subject, text) {
   try {
     await transporter.sendMail({
-      from: process.env.GMAIL_USER,
+      from: process.env.ADMIN_EMAIL,
       to,
       subject,
       text,
@@ -112,7 +117,7 @@ async function sendEmail(to, subject, text) {
 }
 
 // =========================================================
-// STORAGE LAYER (MONGO OR JSON)
+// STORAGE LAYER
 // =========================================================
 
 async function getUserFromStore(username) {
@@ -179,11 +184,6 @@ async function listTxsFromStore() {
   return loadTx();
 }
 
-async function findTxById(id) {
-  if (db) return await db.collection("txids").findOne({ id });
-  return loadTx().find((t) => t.id === id);
-}
-
 async function createTxInStore(record) {
   if (db) {
     await db.collection("txids").insertOne(record);
@@ -230,7 +230,6 @@ async function confirmTxInStore(id, amount) {
 // =========================================================
 // PUBLIC ROUTES
 // =========================================================
-
 app.get("/", (req, res) => res.json({ ok: true }));
 
 // REGISTER
@@ -302,7 +301,7 @@ app.post("/api/user/:user/credit", async (req, res) => {
   res.json({ ok: true, credits });
 });
 
-// SUBMIT TXID (WITH EMAIL)
+// SUBMIT TXID + EMAIL
 app.post("/api/txid", async (req, res) => {
   const { user, txid } = req.body;
 
@@ -312,7 +311,7 @@ app.post("/api/txid", async (req, res) => {
   if (exists) return res.status(400).json({ error: "duplicate txid" });
 
   const record = {
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2,8),
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
     user,
     txid,
     status: "pending",
@@ -321,7 +320,6 @@ app.post("/api/txid", async (req, res) => {
 
   await createTxInStore(record);
 
-  // EMAIL ADMIN
   sendEmail(
     process.env.ADMIN_EMAIL,
     "New TXID Submitted",
@@ -338,7 +336,7 @@ app.get("/api/admin/txids", adminLock, async (req, res) => {
   res.json({ ok: true, txs: await listTxsFromStore() });
 });
 
-// CONFIRM TXID (EMAIL USER OR ADMIN)
+// CONFIRM TXID + EMAIL
 app.post("/api/admin/confirm", adminLock, async (req, res) => {
   try {
     const tx = await confirmTxInStore(req.body.id, 5);
@@ -356,7 +354,7 @@ app.post("/api/admin/confirm", adminLock, async (req, res) => {
 });
 
 // =========================================================
-// ADMIN PANEL (STATIC)
+// ADMIN PANEL STATIC
 // =========================================================
 app.use("/admin", adminLock, express.static(path.join(__dirname, "admin")));
 
