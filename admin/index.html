@@ -1,0 +1,97 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Admin - TXIDs</title>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;padding:18px}
+    table{width:100%;border-collapse:collapse;margin-top:20px}
+    th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}
+    button{padding:6px 10px;cursor:pointer}
+    #status { margin-top: 10px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h2>Pending Transaction IDs</h2>
+  <div id="status"></div>
+  
+  <table>
+    <thead>
+      <tr>
+        <th>Id</th>
+        <th>User</th>
+        <th>TXID</th>
+        <th>Status</th>
+        <th>Time</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <script>
+    const ADMIN_KEY = "liki@2921";
+
+    async function load() {
+      const res = await fetch(`/api/admin/txids?key=${ADMIN_KEY}`);
+      const j = await res.json();
+
+      const rows = document.getElementById("rows");
+      rows.innerHTML = "";
+
+      if (!j.ok || !j.txs) {
+        document.getElementById("status").textContent = "Error loading TXIDs";
+        return;
+      }
+
+      j.txs.slice().reverse().forEach(t => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${t.id}</td>
+          <td>${t.user}</td>
+          <td>${t.txid}</td>
+          <td>${t.status}</td>
+          <td>${new Date(t.date).toLocaleString()}</td>
+          <td></td>
+        `;
+
+        const btn = document.createElement("button");
+        btn.textContent = t.status === "confirmed" ? "Confirmed" : "Confirm";
+        btn.disabled = t.status === "confirmed";
+
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          btn.textContent = "Confirming...";
+
+          try {
+            const res2 = await fetch(`/api/admin/confirm?key=${ADMIN_KEY}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: t.id })
+            });
+
+            const jr = await res2.json();
+
+            if (jr.ok) {
+              document.getElementById("status").textContent = `TXID ${t.id} confirmed`;
+            } else {
+              document.getElementById("status").textContent = jr.error || "Error confirming";
+            }
+
+            load();
+          } catch (err) {
+            document.getElementById("status").textContent = "Network error";
+          }
+        });
+
+        tr.children[5].appendChild(btn);
+        rows.appendChild(tr);
+      });
+    }
+
+    load();
+    setInterval(load, 10000);
+  </script>
+</body>
+</html>
