@@ -5,17 +5,41 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Admin - TXIDs</title>
   <style>
-    body{font-family:Arial,Helvetica,sans-serif;padding:18px}
-    table{width:100%;border-collapse:collapse;margin-top:20px}
+    :root{--pad:12px;--gap:12px}
+    body{font-family:Arial,Helvetica,sans-serif;padding:var(--pad);margin:0}
+    h2{margin:8px 0}
+    .table-wrap{width:100%;overflow-x:auto;margin-top:12px;border-radius:6px}
+    table{width:100%;border-collapse:collapse;min-width:600px}
     th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}
-    button{padding:6px 10px;cursor:pointer}
+
+    button{
+      padding:8px 12px;
+      cursor:pointer;
+      border-radius:4px;
+      border:0;
+      color:#fff;
+    }
+    .approveBtn{background:#0b75ff;}
+    .rejectBtn{background:#e00000;}
+    button[disabled]{opacity:.6;background:#888}
+
     #status { margin-top: 10px; font-weight: bold; }
+
+    @media (max-width:600px){
+      table{min-width:480px}
+      button{display:block;width:100%;box-sizing:border-box;margin-bottom:6px}
+      body{padding:10px}
+    }
   </style>
 </head>
 <body>
   <h2>Pending Transaction IDs</h2>
-  <div id="status"></div>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <div id="status"></div>
+    <div id="pendingBadge" aria-live="polite" style="font-size:14px;color:#333"></div>
+  </div>
   
+  <div class="table-wrap">
   <table>
     <thead>
       <tr>
@@ -29,8 +53,10 @@
     </thead>
     <tbody id="rows"></tbody>
   </table>
+  </div>
 
   <h2>Withdrawal Requests</h2>
+  <div class="table-wrap">
   <table>
     <thead>
       <tr>
@@ -39,10 +65,14 @@
     </thead>
     <tbody id="redeemRows"></tbody>
   </table>
+  </div>
 
   <script>
     const ADMIN_KEY = "liki@2921";
 
+    // ==========================================================
+    // LOAD TXIDs WITH CONFIRM + REJECT
+    // ==========================================================
     async function load() {
       const res = await fetch(`/api/admin/txids?key=${ADMIN_KEY}`);
       const j = await res.json();
@@ -66,13 +96,15 @@
           <td></td>
         `;
 
-        const btn = document.createElement("button");
-        btn.textContent = t.status === "confirmed" ? "Confirmed" : "Confirm";
-        btn.disabled = t.status === "confirmed";
+        // APPROVE BUTTON
+        const btnApprove = document.createElement("button");
+        btnApprove.className = "approveBtn";
+        btnApprove.textContent = t.status === "confirmed" ? "Confirmed" : "Confirm";
+        btnApprove.disabled = t.status === "confirmed";
 
-        btn.addEventListener("click", async () => {
-          btn.disabled = true;
-          btn.textContent = "Confirming...";
+        btnApprove.onclick = async () => {
+          btnApprove.disabled = true;
+          btnApprove.textContent = "Confirming...";
 
           try {
             const res2 = await fetch(`/api/admin/confirm?key=${ADMIN_KEY}`, {
@@ -89,13 +121,28 @@
               document.getElementById("status").textContent = jr.error || "Error confirming";
             }
 
-            load();
-          } catch (err) {
+            await load();
+            await loadRedeems();
+            updatePendingCounts();
+          } catch {
             document.getElementById("status").textContent = "Network error";
           }
-        });
+        };
 
-        tr.children[5].appendChild(btn);
+        // REJECT BUTTON (LOCAL ONLY — NO BACKEND)
+        const btnReject = document.createElement("button");
+        btnReject.className = "rejectBtn";
+        btnReject.textContent = "Reject";
+
+        btnReject.onclick = () => {
+          tr.remove(); // remove row from UI only
+          document.getElementById("status").textContent = `TXID ${t.id} rejected (local only)`;
+          updatePendingCounts();
+        };
+
+        tr.children[5].appendChild(btnApprove);
+        if (t.status !== "confirmed") tr.children[5].appendChild(btnReject);
+
         rows.appendChild(tr);
       });
     }
@@ -103,7 +150,9 @@
     load();
     setInterval(load, 10000);
 
-    // Withdrawals
+    // ==========================================================
+    // WITHDRAWALS
+    // ==========================================================
     async function loadRedeems() {
       try {
         const res = await fetch(`/api/admin/redeems?key=${ADMIN_KEY}`);
@@ -111,6 +160,7 @@
         const rows = document.getElementById('redeemRows');
         rows.innerHTML = '';
         if (!j.ok || !j.redeems) return;
+
         j.redeems.slice().reverse().forEach(r => {
           const tr = document.createElement('tr');
           tr.innerHTML = `
@@ -122,30 +172,71 @@
             <td></td>
           `;
 
-          const btn = document.createElement('button');
-          btn.textContent = r.status === 'approved' ? 'Approved' : 'Approve';
-          btn.disabled = r.status === 'approved';
-          btn.onclick = async () => {
-            btn.disabled = true;
-            btn.textContent = 'Approving...';
+          const btnApprove = document.createElement('button');
+          btnApprove.className = "approveBtn";
+          btnApprove.textContent = r.status === 'approved' ? 'Approved' : 'Approve';
+          btnApprove.disabled = r.status === 'approved';
+
+          btnApprove.onclick = async () => {
+            btnApprove.disabled = true;
+            btnApprove.textContent = 'Approving...';
+
             await fetch(`/api/admin/confirmRedeem?key=${ADMIN_KEY}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ id: r.id })
             });
-            loadRedeems();
+
+            await loadRedeems();
+            await load();
+            updatePendingCounts();
           };
 
-          tr.children[5].appendChild(btn);
+          // REJECT Button (local only)
+          const btnReject = document.createElement("button");
+          btnReject.className = "rejectBtn";
+          btnReject.textContent = "Reject";
+          btnReject.onclick = () => {
+            tr.remove();
+            document.getElementById("status").textContent = `Withdraw ${r.id} rejected (local only)`;
+            updatePendingCounts();
+          };
+
+          tr.children[5].appendChild(btnApprove);
+          if (r.status !== "approved") tr.children[5].appendChild(btnReject);
+
           rows.appendChild(tr);
         });
-      } catch (e) {
-        console.warn('failed loading redeems', e);
-      }
+      } catch {}
     }
 
     loadRedeems();
     setInterval(loadRedeems, 10000);
+
+    // ==========================================================
+    // PENDING COUNTS
+    // ==========================================================
+    function renderBadge(txPending, redeemPending){
+      const el = document.getElementById('pendingBadge');
+      el.innerHTML = `Pending: <strong style="color:#c00">${txPending}</strong> TXs • <strong style="color:#c00">${redeemPending}</strong> Redeems`;
+    }
+
+    async function updatePendingCounts(){
+      try{
+        const [txRes, rdRes] = await Promise.all([
+          fetch(`/api/admin/txids?key=${ADMIN_KEY}`),
+          fetch(`/api/admin/redeems?key=${ADMIN_KEY}`)
+        ]);
+        const jt = await txRes.json();
+        const jr = await rdRes.json();
+        const txPending = (jt.txs||[]).filter(x=>x.status!=='confirmed').length;
+        const redeemPending = (jr.redeems||[]).filter(r=>r.status!=='approved').length;
+        renderBadge(txPending, redeemPending);
+      }catch{}
+    }
+
+    updatePendingCounts();
+    setInterval(updatePendingCounts, 10000);
   </script>
 </body>
 </html>
