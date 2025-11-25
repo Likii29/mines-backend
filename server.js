@@ -233,6 +233,48 @@ async function confirmTxInStore(id, amount) {
 const REDEEMS_FILE = path.join(DATA_DIR, "redeems.json");
 if (!fs.existsSync(REDEEMS_FILE)) fs.writeFileSync(REDEEMS_FILE, "[]", "utf8");
 
+// =========================================================
+// TRANSACTIONS STORAGE + HELPERS
+// =========================================================
+const TRANSACTIONS_FILE = path.join(DATA_DIR, "transactions.json");
+if (!fs.existsSync(TRANSACTIONS_FILE)) fs.writeFileSync(TRANSACTIONS_FILE, "[]", "utf8");
+
+function loadTransactions() { return JSON.parse(fs.readFileSync(TRANSACTIONS_FILE, "utf8") || "[]"); }
+function saveTransactions(t) { fs.writeFileSync(TRANSACTIONS_FILE, JSON.stringify(t, null, 2), "utf8"); }
+
+async function createTransaction(user, type, amount, details = {}) {
+  const rec = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2,8),
+    user,
+    type, // 'deposit', 'withdrawal', 'bet', 'win'
+    amount, // positive for deposits/wins, negative for withdrawals/bets
+    details,
+    date: new Date().toISOString()
+  };
+
+  if (db) {
+    await db.collection('transactions').insertOne(rec);
+    return rec;
+  }
+
+  const all = loadTransactions();
+  all.push(rec);
+  saveTransactions(all);
+  return rec;
+}
+
+async function listTransactionsForUser(username, type = null) {
+  if (db) {
+    const q = { user: username };
+    if (type) q.type = type;
+    return await db.collection('transactions').find(q).sort({ date: -1 }).toArray();
+  }
+  const all = loadTransactions();
+  let filtered = all.filter(t => t.user === username);
+  if (type) filtered = filtered.filter(t => t.type === type);
+  return filtered.sort((a, b) => new Date(b.date) - new Date(a.date));
+}
+
 function loadRedeems() { return JSON.parse(fs.readFileSync(REDEEMS_FILE, "utf8") || "[]"); }
 function saveRedeems(r) { fs.writeFileSync(REDEEMS_FILE, JSON.stringify(r, null, 2), "utf8"); }
 
@@ -391,10 +433,29 @@ app.get('/api/user/:user', async (req,res)=>{
   }catch(e){ console.error('user fetch err', e); res.status(500).json({ error:'failed' }); }
 });
 
+// GET TRANSACTIONS FOR USER
+app.get('/api/user/:user/transactions', async (req, res) => {
+  try {
+    const user = req.params.user;
+    const type = req.query.type || null; // optional filter: 'deposit', 'withdrawal', 'bet', 'win'
+    const txs = await listTransactionsForUser(user, type);
+    res.json({ ok: true, transactions: txs });
+  } catch (e) {
+    console.error('transactions fetch error', e);
+    res.status(500).json({ error: 'failed' });
+  }
+});
+
 // DEBIT
 app.post("/api/user/:user/debit", async (req, res) => {
   try {
-    const credits = await debitUserInStore(req.params.user, req.body.amount);
+    const user = req.params.user;
+    const amount = req.body.amount;
+    const credits = await debitUserInStore(user, amount);
+    
+    // Record transaction (bet)
+    await createTransaction(user, 'bet', -amount, { description: 'Game round started' });
+    
     res.json({ ok: true, credits });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -403,8 +464,18 @@ app.post("/api/user/:user/debit", async (req, res) => {
 
 // CREDIT
 app.post("/api/user/:user/credit", async (req, res) => {
-  const credits = await creditUserInStore(req.params.user, req.body.amount);
-  res.json({ ok: true, credits });
+  try {
+    const user = req.params.user;
+    const amount = req.body.amount;
+    const credits = await creditUserInStore(user, amount);
+    
+    // Record transaction (win)
+    await createTransaction(user, 'win', amount, { description: 'Game round won' });
+    
+    res.json({ ok: true, credits });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // SUBMIT TXID + EMAIL
@@ -453,6 +524,9 @@ app.post('/api/user/:user/redeem', async (req, res) => {
     // create redeem request
     const rec = await createRedeemRequest(user, email, Number(amount));
 
+    // Record withdrawal transaction
+    await createTransaction(user, 'withdrawal', -amount, { upi: email, description: 'Withdrawal request', requestId: rec.id });
+
     return res.json({ ok: true, request: rec });
   } catch (err) {
     console.error('redeem error', err);
@@ -493,6 +567,9 @@ app.post('/api/admin/confirmRedeem', adminLock, async (req, res) => {
 app.post("/api/admin/confirm", adminLock, async (req, res) => {
   try {
     const tx = await confirmTxInStore(req.body.id, 5);
+
+    // Record deposit transaction
+    await createTransaction(tx.user, 'deposit', 5, { txid: tx.txid, description: 'Credits added via UPI' });
 
     sendEmail(
       process.env.ADMIN_EMAIL,
